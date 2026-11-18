@@ -1,1 +1,32 @@
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 150m
+    memory: 128Mi
+
+config:
+  filters: |
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Merge_Log           On
+        Keep_Log            Off
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude On
+
+  outputs: |
+    [OUTPUT]
+        Name               es
+        Match              kube.*
+        Host               YOUR_ELASTIC_HOST
+        Port               443
+        TLS                On
+        HTTP_User          elastic
+        HTTP_Passwd        YOUR_ELASTIC_PASSWORD
+        Logstash_Format    On
+        Logstash_Prefix    eks-microservices-logs
+        Suppress_Type_Name On
+        Retry_Limit        False
 
