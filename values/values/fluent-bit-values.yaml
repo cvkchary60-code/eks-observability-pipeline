@@ -20,11 +20,11 @@ config:
     [OUTPUT]
         Name               es
         Match              kube.*
-        Host               YOUR_ELASTIC_HOST
+        Host               fluentuser
         Port               443
         TLS                On
         HTTP_User          elastic
-        HTTP_Passwd        YOUR_ELASTIC_PASSWORD
+        HTTP_Passwd        ElasticPass123!
         Logstash_Format    On
         Logstash_Prefix    eks-microservices-logs
         Suppress_Type_Name On
