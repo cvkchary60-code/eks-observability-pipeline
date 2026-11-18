@@ -1,1 +1,238 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: microservices-code
+data:
+  payment_service.py: |
+    import time, random, json
+    from flask import Flask, jsonify
+    from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    from opentelemetry import trace
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.instrumentation.flask import FlaskInstrumentor
+
+    resource = Resource(attributes={"service.name": "payment-service"})
+    provider = TracerProvider(resource=resource)
+    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint="http://cluster.local")))
+    trace.set_tracer_provider(provider)
+
+    app = Flask(__name__)
+    FlaskInstrumentor().instrument_app(app)
+
+    REQ_COUNT = Counter("http_requests_total", "Total HTTP Requests", ["service", "method", "status"])
+    REQ_LATENCY = Histogram("http_request_duration_seconds", "HTTP Request Latency", ["service"])
+
+    @app.route("/metrics")
+    def metrics():
+        return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
+
+    @app.route("/charge", methods=["POST"])
+    def charge():
+        start = time.time()
+        span = trace.get_current_span()
+        trace_id = format(span.get_span_context().trace_id, "032x")
+
+        roll = random.random()
+        if roll < 0.15:
+            time.sleep(random.uniform(1.8, 2.8))
+        if roll < 0.10:
+            latency = round((time.time() - start) * 1000, 2)
+            REQ_COUNT.labels("payment-service", "POST", "500").inc()
+            REQ_LATENCY.labels("payment-service").observe(time.time() - start)
+            print(json.dumps({"level": "ERROR", "service": "payment-service", "trace_id": trace_id, "status_code": 500, "latency_ms": latency, "message": "RDS ConnectionPoolTimeoutException during payment authorization"}), flush=True)
+            return jsonify({"error": "Payment gateway timeout", "trace_id": trace_id}), 500
+
+        time.sleep(random.uniform(0.03, 0.12))
+        latency = round((time.time() - start) * 1000, 2)
+        REQ_COUNT.labels("payment-service", "POST", "200").inc()
+        REQ_LATENCY.labels("payment-service").observe(time.time() - start)
+        print(json.dumps({"level": "INFO", "service": "payment-service", "trace_id": trace_id, "status_code": 200, "latency_ms": latency, "message": "Payment authorized successfully"}), flush=True)
+        return jsonify({"status": "approved", "trace_id": trace_id}), 200
+
+    if __name__ == "__main__":
+        app.run(host="0.0.0.0", port=5001)
+
+  gateway_service.py: |
+    import time, json, requests
+    from flask import Flask, jsonify
+    from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    from opentelemetry import trace
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.instrumentation.flask import FlaskInstrumentor
+    from opentelemetry.instrumentation.requests import RequestsInstrumentor
+
+    resource = Resource(attributes={"service.name": "checkout-gateway"})
+    provider = TracerProvider(resource=resource)
+    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint="http://cluster.local")))
+    trace.set_tracer_provider(provider)
+
+    app = Flask(__name__)
+    FlaskInstrumentor().instrument_app(app)
+    RequestsInstrumentor().instrument()
+
+    REQ_COUNT = Counter("http_requests_total", "Total HTTP Requests", ["service", "method", "status"])
+    REQ_LATENCY = Histogram("http_request_duration_seconds", "HTTP Request Latency", ["service"])
+
+    @app.route("/metrics")
+    def metrics():
+        return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
+
+    @app.route("/checkout", methods=["POST"])
+    def checkout():
+        start = time.time()
+        span = trace.get_current_span()
+        trace_id = format(span.get_span_context().trace_id, "032x")
+        try:
+            resp = requests.post("http://payment-service:5001/charge", timeout=5)
+            latency = round((time.time() - start) * 1000, 2)
+            REQ_COUNT.labels("checkout-gateway", "POST", str(resp.status_code)).inc()
+            REQ_LATENCY.labels("checkout-gateway").observe(time.time() - start)
+            level = "ERROR" if resp.status_code >= 500 else "INFO"
+            print(json.dumps({"level": level, "service": "checkout-gateway", "trace_id": trace_id, "status_code": resp.status_code, "latency_ms": latency, "message": f"Checkout completed with upstream status {resp.status_code}"}), flush=True)
+            return jsonify(resp.json()), resp.status_code
+        except Exception as e:
+            REQ_COUNT.labels("checkout-gateway", "POST", "502").inc()
+            print(json.dumps({"level": "ERROR", "service": "checkout-gateway", "trace_id": trace_id, "status_code": 502, "message": str(e)}), flush=True)
+            return jsonify({"error": "Upstream failure", "trace_id": trace_id}), 502
+
+    if __name__ == "__main__":
+        app.run(host="0.0.0.0", port=5000)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  labels:
+    app: payment-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      containers:
+      - name: payment-service
+        image: python:3.11-slim
+        command: ["/bin/sh", "-c"]
+        args:
+          - pip install -q flask requests prometheus-client opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http opentelemetry-instrumentation-flask && python /app/payment_service.py
+        ports:
+        - name: http
+          containerPort: 5001
+        volumeMounts:
+        - name: code
+          mountPath: /app
+      volumes:
+      - name: code
+        configMap:
+          name: microservices-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  labels:
+    app: payment-service
+spec:
+  selector:
+    app: payment-service
+  ports:
+  - name: http
+    port: 5001
+    targetPort: 5001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-gateway
+  labels:
+    app: checkout-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: checkout-gateway
+  template:
+    metadata:
+      labels:
+        app: checkout-gateway
+    spec:
+      containers:
+      - name: checkout-gateway
+        image: python:3.11-slim
+        command: ["/bin/sh", "-c"]
+        args:
+          - pip install -q flask requests prometheus-client opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http opentelemetry-instrumentation-flask opentelemetry-instrumentation-requests && python /app/gateway_service.py
+        ports:
+        - name: http
+          containerPort: 5000
+        volumeMounts:
+        - name: code
+          mountPath: /app
+      volumes:
+      - name: code
+        configMap:
+          name: microservices-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout-gateway
+  labels:
+    app: checkout-gateway
+spec:
+  selector:
+    app: checkout-gateway
+  ports:
+  - name: http
+    port: 5000
+    targetPort: 5000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-generator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-generator
+  template:
+    metadata:
+      labels:
+        app: traffic-generator
+    spec:
+      containers:
+      - name: loadgen
+        image: curlimages/curl:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - while true; do curl -s -X POST http://checkout-gateway:5000/checkout > /dev/null; sleep 2; done
+---
+apiVersion: ://coreos.com
+kind: ServiceMonitor
+metadata:
+  name: microservices-monitor
+  labels:
+    release: kube-prometheus
+spec:
+  selector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["checkout-gateway", "payment-service"]
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 15s
 
