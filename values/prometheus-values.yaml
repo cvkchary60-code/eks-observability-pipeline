@@ -10,6 +10,19 @@ grafana:
       cpu: 300m
       memory: 512Mi
 
+nodeExporter:
+  enabled: false
+
+prometheus-node-exporter:
+  enabled: false
+
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
 prometheus:
   prometheusSpec:
     retention: 24h
@@ -41,4 +54,3 @@ alertmanager:
       limits:
         cpu: 100m
         memory: 256Mi
-
