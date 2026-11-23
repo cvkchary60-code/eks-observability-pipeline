@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         AWS_REGION   = "ap-southeast-2"
-        CLUSTER_NAME = "observability-monitoring"
+        CLUSTER_NAME = "k8s_cluster"
         OBS_NS       = "observability"
         APP_NS       = "microservices"
     }
@@ -54,7 +54,7 @@ pipeline {
                 sh '''
                     helm upgrade --install fluent-bit fluent/fluent-bit \
                       --namespace ${OBS_NS} \
-                      -f values/values/fluent-bit-values.yaml \
+                      -f values/fluent-bit-values.yaml \
                       --wait --timeout 5m
                 '''
             }
@@ -65,7 +65,7 @@ pipeline {
                 sh '''
                     helm upgrade --install jaeger jaegertracing/jaeger \
                       --namespace ${OBS_NS} \
-                      -f values/values/values/jaeger-values.yaml \
+                      -f values/jaeger-values.yaml \
                       --wait --timeout 5m
 
                     kubectl expose deployment jaeger -n ${OBS_NS} \
@@ -92,9 +92,9 @@ pipeline {
                 sh '''
                     echo "========================================="
                     echo "GRAFANA URL (admin / AdminPassword123!):"
-                    kubectl get svc kube-prometheus-grafana -n ${OBS_NS} -o jsonpath='http://{.status.loadBalancer.ingress.hostname}\n'
+                    kubectl get svc kube-prometheus-grafana -n ${OBS_NS} -o jsonpath='http://{.status.loadBalancer.ingress[0].hostname}\n'
                     echo "JAEGER UI URL:"
-                    kubectl get svc jaeger-ui-lb -n ${OBS_NS} -o jsonpath='http://{.status.loadBalancer.ingress.hostname}:16686\n'
+                    kubectl get svc jaeger-ui-lb -n ${OBS_NS} -o jsonpath='http://{.status.loadBalancer.ingress[0].hostname}:16686\n'
                     echo "========================================="
                 '''
             }
